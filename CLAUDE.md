@@ -25,9 +25,9 @@ replicação.
   de `ticket_message` via `?diag=1` antes de confiar nos rótulos "cliente" vs
   "operador" e "resposta" vs "nota interna", pois isso pode variar entre
   instalações do SupportPal.
-- **Usuário MySQL deveria ser somente `SELECT`.** A instância original em
-  produção não segue essa própria recomendação (usuário com `ALL PRIVILEGES`),
-  ver §6 de `DOCUMENTATION.md`. Ao criar/replicar uma nova instância, criar
+- **Usuário MySQL deveria ser somente `SELECT`.** A instância original ficou
+  com `ALL PRIVILEGES` até 2026-11-24, quando foi reduzida a `SELECT` (§6.7 de
+  `DOCUMENTATION.md`). Ao criar/replicar uma nova instância, criar
   o usuário já como read-only.
 - **Atualizar `DOCUMENTATION.md`** a cada mudança relevante de código,
   arquitetura ou processo de replicação.
