@@ -20,11 +20,11 @@ DirectoryIndex sp_viewer.php
 # Cabeçalhos de segurança: desde a v1.1.0 o próprio sp_viewer.php envia
 # X-Frame-Options, X-Content-Type-Options, Referrer-Policy e a
 # Content-Security-Policy (com nonce por requisição, que o Apache não tem
-# como gerar). Não defina Content-Security-Policy aqui: o navegador aplica as
-# duas ao mesmo tempo, então a daqui nunca afrouxa a do PHP, só pode quebrar
-# a tela se for mais restrita. Instância que veio de versão anterior pode
-# remover a linha "Header always set Content-Security-Policy ..." do
-# .htaccess real (a antiga, com 'unsafe-inline', convive sem quebrar).
+# como gerar). NÃO defina Content-Security-Policy aqui: medido em LiteSpeed,
+# o "Header always set" SUBSTITUI o cabeçalho enviado pelo PHP, e a política
+# com nonce nunca chega ao navegador. Instância que veio de versão anterior
+# precisa remover a linha "Header always set Content-Security-Policy ..."
+# do .htaccess real e conferir com curl -I que a resposta traz 'nonce-'.
 # Fica aqui só o HSTS (exige mod_headers).
 <IfModule mod_headers.c>
   Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"

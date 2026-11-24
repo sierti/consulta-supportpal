@@ -428,14 +428,42 @@ navegador real. Tudo corrigido na v1.1.0:
    pelo usuário do site. Se não for, ninguém entra (falha fechada) e o log de
    erro do PHP diz o motivo. Conferir **antes** de trocar o arquivo.
 2. A sessão de quem estiver logado cai uma vez (mudou o nome do cookie).
-3. A linha `Content-Security-Policy` do `.htaccess` deixa de ser necessária
-   (ver comentário no `.htaccess.example`).
+3. A linha `Header always set Content-Security-Policy ...` do `.htaccess`
+   **tem de sair**. Medido em LiteSpeed: ela substitui a CSP enviada pelo
+   PHP e a política com nonce não chega ao navegador (a tela continua
+   funcionando, então o erro passa despercebido). Conferir com `curl -I`
+   que o cabeçalho traz `script-src 'nonce-...'`.
 4. Instância com constante ajustada localmente (ex.: `MSG_BY_OPERATOR`, §5)
    não recebe o arquivo do repositório por cima: aplica-se só a diferença,
    preservando o valor medido naquela instância.
 
 Testes: `php tests/test_sp_viewer.php` (inclui 20 processos concorrentes
-contra o limite de login e checagens de fonte para cada item acima).
+contra o limite de login e checagens de fonte para cada item acima). Em
+hospedagem com `proc_open` em `disable_functions`, o teste de concorrência
+morre calado: rodar com `php -d disable_functions= tests/test_sp_viewer.php`.
+
+### 6.7 Versão 1.1.0 na instância original (SIERTI, 2026-11-24)
+
+- **Medido antes:** a instância estava atrás do repositório (sem o limite de
+  login da 1.0.0 tardia) e mantinha `MSG_BY_OPERATOR = 0`. PHP web em lsphp
+  com CageFS: o diretório temporário é privado da conta e gravável.
+- **Porte:** correções aplicadas por âncora exata sobre uma cópia do arquivo
+  da instância; resultado difere do repositório em uma única linha
+  (`MSG_BY_OPERATOR`). Lint em PHP 8.1, 8.2 e 8.3 e suíte completa (48
+  verificações) rodados no próprio servidor, fora do webroot, antes da troca.
+- **Backup** de `sp_viewer.php` e de `.htaccess` fora do webroot; MD5 igual
+  nos dois lados depois do envio.
+- **`.htaccess`:** removida somente a linha da CSP estática (item 3 acima).
+- **Verificado pelo domínio público:** tela de login 200 com a CSP com nonce
+  e cookie `SPVSESSID; Secure; HttpOnly; SameSite=Lax`; `?logout=1` sem
+  efeito; senha errada responde 200 e cria o contador no diretório
+  temporário (prova de que a falha fechada não trava o login); senha em
+  formato de lista sem aviso nem caminho; listagem autenticada com todos os
+  scripts com nonce, nenhum manipulador inline e formulário de logout.
+- **Não verificado em produção:** página de chamado com imagens, tema e
+  autocomplete em navegador autenticado (verificados localmente com o
+  mesmo código; em produção dependem de login com a senha de acesso).
+- **Pendente:** usuário do banco segue com `ALL PRIVILEGES` (§9).
 
 ## 7. Replicando para outro provedor/cliente
 
@@ -485,6 +513,6 @@ replicações futuras. Não é servido/executado localmente.
 
 ## 9. Pendências / possíveis melhorias (não aplicadas, apenas observadas)
 
-- Trocar o usuário MySQL de produção para um `SELECT`-only real, em qualquer instância que ainda não tenha isso (§6).
+- Trocar o usuário MySQL de produção para um `SELECT`-only real, em qualquer instância que ainda não tenha isso (§6). Na instância original, medido em 2026-11-24: ainda `ALL PRIVILEGES`, e o SupportPal antigo (mesmo usuário) não grava no banco desde 2026-07-10.
 - Adotar git no diretório de produção do servidor, ou ao menos fazer deploys a partir deste repositório local versionado.
 - Remover páginas padrão do painel de hosting (`index.html` etc.) que não são usadas pelo app e podem confundir quem administra o hosting.
