@@ -64,35 +64,82 @@ want_true('os candidatos vao para o error_log',  (bool)preg_match('/error_log\(.
 want_true('a mensagem ao usuario continua generica',
     (bool)preg_match("/exit\('Arquivo não localizado no disco\.'\)/", $bloco));
 
-/* ── achado M3 (varredura 2026-09-05): limite de tentativas de login ──── */
+/* ── limite de tentativas de login (M3 de 2026-09-05, refeito na v1.1.0) ─ */
 if (!preg_match('/^const LOGIN_MAX_FALHAS.*?\n(?=\/\*\*)/ms', $src, $c)
     || !preg_match('/^function login_throttle\(.*?\n\}/ms', $src, $f)) {
     fwrite(STDERR, "ABORTADO: nao achei login_throttle() em sp_viewer.php\n");
     exit(2);
 }
+ini_set('error_log', '/dev/null'); // a falha fechada registra no log; nao sujar a saida
 eval($c[0] . $f[0]);
 $dir = sys_get_temp_dir() . '/sp_viewer_test_' . getmypid();
 @mkdir($dir);
 $t0  = 1_800_000_000;
-echo "── achado M3: limite de tentativas de login ──\n";
+echo "── limite de login: reserva antes de verificar ──\n";
 want('IP novo esta liberado',                    login_throttle('10.0.0.1', null,  $t0, $dir), 0);
-for ($i = 1; $i <= 4; $i++) { login_throttle('10.0.0.1', false, $t0 + $i, $dir); }
-want('4 falhas ainda nao bloqueiam',             login_throttle('10.0.0.1', null,  $t0 + 5, $dir), 0);
-login_throttle('10.0.0.1', false, $t0 + 5, $dir);
-want('5a falha bloqueia por 15 min',             login_throttle('10.0.0.1', null,  $t0 + 6, $dir), 899);
+$r = [];
+for ($i = 1; $i <= 5; $i++) { $r[] = login_throttle('10.0.0.1', false, $t0 + $i, $dir); }
+want('as 5 primeiras tentativas sao liberadas',  $r, [0, 0, 0, 0, 0]);
+want('a 6a tentativa e bloqueada sem contar',    login_throttle('10.0.0.1', false, $t0 + 6, $dir), 899);
+want('consulta mostra o bloqueio de 15 min',     login_throttle('10.0.0.1', null,  $t0 + 6, $dir), 899);
 want('outro IP nao e afetado',                   login_throttle('10.0.0.2', null,  $t0 + 6, $dir), 0);
-want('bloqueio expira 15 min apos a ultima falha', login_throttle('10.0.0.1', null, $t0 + 5 + 901, $dir), 0);
+want('bloqueio expira 15 min apos a ultima tentativa', login_throttle('10.0.0.1', null, $t0 + 5 + 901, $dir), 0);
 login_throttle('10.0.0.1', false, $t0 + 2000, $dir);
 login_throttle('10.0.0.1', true,  $t0 + 2001, $dir);
 want('sucesso zera o contador',                  login_throttle('10.0.0.1', null,  $t0 + 2002, $dir), 0);
-want_true('falha sem sucesso conta de novo do zero apos a janela',
-    login_throttle('10.0.0.1', false, $t0 + 2003, $dir) === 0);
+
+echo "\n── limite de login: falha fechada ──\n";
+want('diretorio do contador inexistente bloqueia a reserva',
+    login_throttle('10.0.0.3', false, $t0, $dir . '/nao_existe'), LOGIN_JANELA);
+want('diretorio do contador inexistente bloqueia a consulta',
+    login_throttle('10.0.0.3', null,  $t0, $dir . '/nao_existe'), LOGIN_JANELA);
+
+echo "\n── limite de login: IPv6 conta por /64 ──\n";
+want('dois enderecos do mesmo /64 dividem o contador',
+    login_throttle_chave('2001:db8:1:2::1'), login_throttle_chave('2001:db8:1:2:ffff::9'));
+want_true('/64 diferente tem contador proprio',
+    login_throttle_chave('2001:db8:1:2::1') !== login_throttle_chave('2001:db8:1:3::1'));
+want('IPv4 segue por endereco exato',            login_throttle_chave('192.0.2.7'), '192.0.2.7');
+
+echo "\n── limite de login: 20 reservas simultaneas liberam no maximo 5 ──\n";
+$filho = "$dir/filho.php";
+file_put_contents($filho, "<?php\n" . $c[0] . $f[0] . "\necho login_throttle('10.0.0.9', false, $t0, " . var_export($dir, true) . ") === 0 ? 'L' : 'B';\n");
+$procs = [];
+for ($i = 0; $i < 20; $i++) {
+    $procs[] = proc_open([PHP_BINARY, $filho], [1 => ['pipe', 'w']], $pp[$i]);
+}
+$saida = '';
+foreach ($procs as $i => $p) { $saida .= stream_get_contents($pp[$i][1]); proc_close($p); }
+want('20 processos responderam',                 strlen($saida), 20);
+want('exatamente 5 liberadas',                   substr_count($saida, 'L'), 5);
+want('15 bloqueadas',                            substr_count($saida, 'B'), 15);
+unlink($filho);
+
+echo "\n── fluxo de login, logout e redirecionamento (leitura do fonte) ──\n";
 $bl = preg_match('/if \(empty\(\$_SESSION\[\'auth\'\]\)\) \{.*?render_login\(\$err\);/s', $src, $lb) ? $lb[0] : '';
-want_true('o fluxo de login consulta o throttle antes do password_verify',
-    strpos($bl, 'login_throttle($ip)') !== false && strpos($bl, 'login_throttle($ip)') < strpos($bl, 'password_verify'));
-want_true('falha registra e sucesso zera',
-    strpos($bl, 'login_throttle($ip, false)') !== false && strpos($bl, 'login_throttle($ip, true)') !== false);
-want_true('bloqueio responde 429', strpos($bl, 'http_response_code(429)') !== false);
+want_true('o login reserva a tentativa antes do password_verify',
+    strpos($bl, 'login_throttle($ip, false)') !== false && strpos($bl, 'login_throttle($ip, false)') < strpos($bl, 'password_verify'));
+want('a tentativa e contada uma unica vez',      substr_count($bl, 'login_throttle($ip, false)'), 1);
+want_true('sucesso zera o contador',             strpos($bl, 'login_throttle($ip, true)') !== false);
+want_true('bloqueio responde 429',               strpos($bl, 'http_response_code(429)') !== false);
+want_true('senha precisa ser string',            strpos($bl, "is_string(\$_POST['password'])") !== false);
+want('nenhum cast de array para string na senha', preg_match('/\(string\)\s*\$_POST\[\'password\'\]/', $src), 0);
+want('nenhum Location montado com REQUEST_URI',  preg_match('/header\([^;]*REQUEST_URI/', $src), 0);
+want('logout por GET nao existe mais',           preg_match('/\$_GET\[\'logout\'\]/', $src), 0);
+want_true('logout exige POST e token da sessao',
+    (bool)preg_match('/REQUEST_METHOD\'\] === \'POST\' && isset\(\$_POST\[\'logout\'\]\).*?hash_equals\(\$ref, \$tok\)/s', $src));
+want('nenhum link de logout por GET na pagina',  substr_count($src, '?logout'), 0);
+
+echo "\n── navegador: CSP com nonce e nada de manipulador em atributo ──\n";
+want_true('display_errors desligado no inicio',  strpos($src, "ini_set('display_errors', '0')") !== false);
+want_true('CSP emitida pelo PHP com nonce',      (bool)preg_match('/Content-Security-Policy: default-src \'self\'.*script-src \'nonce-/s', $src));
+want('CSP do PHP sem unsafe-inline em script',   preg_match('/script-src[^;"]*unsafe-inline/', $src), 0);
+want('nenhum <script> sem nonce',                preg_match('/(^|\')<script>/m', $src), 0);
+want('nenhum atributo onclick ou onload emitido', preg_match('/\son(click|load|input|submit)="/', $src), 0);
+want('autocomplete nao monta HTML com dado do banco', preg_match('/innerHTML\s*=\s*[^\';]*r\.name/', $src), 0);
+want_true('cookie de sessao sempre Secure',      (bool)preg_match("/'secure'\s*=>\s*true,/", $src));
+want_true('iframe de terceiro tem politica propria',
+    strpos($src, "default-src \\'none\\'; img-src \\'self\\' data:") !== false);
 array_map('unlink', glob("$dir/sp_login_*") ?: []); @rmdir($dir);
 
 echo $falhas === 0

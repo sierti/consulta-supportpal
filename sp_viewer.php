@@ -26,11 +26,39 @@ declare(strict_types=1);
 
 // Cookie de sessão hardenizado: HttpOnly (mitiga roubo de sessão via XSS),
 // Secure (nunca trafega em HTTP puro) e SameSite (defesa extra contra CSRF).
+// Diagnostico do PHP nunca vai para o navegador (caminho do disco em aviso):
+// nao depende do display_errors do host. Erros seguem para o log do servidor.
+ini_set('display_errors', '0');
+set_exception_handler(function (Throwable $e): void {
+    error_log('sp_viewer: ' . get_class($e) . ': ' . $e->getMessage());
+    if (!headers_sent()) { http_response_code(500); header('Content-Type: text/plain; charset=utf-8'); }
+    echo 'Erro interno ao processar a consulta. Se foi uma busca profunda, refine o termo e tente de novo.';
+});
+
+/* Nonce da CSP: so os <script> emitidos por este arquivo carregam o valor. */
+$SP_NONCE = base64_encode(random_bytes(16));
+function csp_nonce(): string { global $SP_NONCE; return $SP_NONCE; }
+
+/* Cabecalhos de seguranca emitidos pelo proprio PHP, para nao depender de o
+ * .htaccess da instancia ter o bloco nem de mod_headers estar carregado.
+ * script-src so aceita o nonce: script em linha injetado nao executa, e
+ * atributo on*="" tambem nao (os manipuladores sao ligados por addEventListener). */
+header('X-Frame-Options: DENY');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: no-referrer');
+header("Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+     . "script-src 'nonce-" . $SP_NONCE . "'; frame-src 'self'; base-uri 'none'; "
+     . "form-action 'self'; frame-ancestors 'none'");
+
 ini_set('session.use_strict_mode', '1');
+// Nome proprio: nao divide o cookie PHPSESSID com outra aplicacao PHP do dominio.
+session_name('SPVSESSID');
 session_set_cookie_params([
     'lifetime' => 0,
     'path'     => '/',
-    'secure'   => !empty($_SERVER['HTTPS']) || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https'),
+    // Sempre Secure: a aplicacao so funciona em HTTPS (em HTTP puro o navegador
+    // nao devolve o cookie e o login nao se mantem, de proposito).
+    'secure'   => true,
     'httponly' => true,
     'samesite' => 'Lax',
 ]);
@@ -106,7 +134,7 @@ const PER_PAGE = 25;
 
 /* Versão exibida na tela de login (link pro changelog no GitHub). Atualizar
  * a cada mudança relevante, seguindo semver (semver.org) e o CHANGELOG.md. */
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const APP_REPO_URL = 'https://github.com/ergti/consulta-supportpal';
 
 /* ---------------------------------------------------------------------
@@ -162,30 +190,52 @@ if ($CFG['allow_ips'] !== '') {
  * ===================================================================== */
 function h(?string $s): string { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
-/* Limite de tentativas de login: 5 falhas em 15 min bloqueiam o IP por 15 min
- * contados da ultima falha. Contador em arquivo no diretorio temporario, um
+/* Limite de tentativas de login: 5 tentativas em 15 min bloqueiam o IP por 15 min
+ * contados da ultima tentativa. Contador em arquivo no diretorio temporario, um
  * por IP (hash), sem banco e sem dependencia. Sucesso zera o contador.
+ * A tentativa e RESERVADA (contada) antes do password_verify, com o arquivo
+ * travado por flock do inicio ao fim: requisicoes simultaneas nao passam todas
+ * pela checagem antes de a primeira contar. Sem conseguir abrir, travar ou
+ * gravar o contador, a resposta e bloqueio (falha fechada).
  * Usa REMOTE_ADDR como a allowlist acima: atras de proxy reverso sem
- * X-Forwarded-For confiavel, todos os visitantes dividem o mesmo balde. */
+ * X-Forwarded-For confiavel, todos os visitantes dividem o mesmo balde.
+ * IPv6 conta por prefixo /64, que e o que um mesmo assinante controla. */
 const LOGIN_MAX_FALHAS = 5;
 const LOGIN_JANELA     = 900;
 
+function login_throttle_chave(string $ip): string {
+    $bin = @inet_pton($ip);
+    return ($bin !== false && strlen($bin) === 16) ? bin2hex(substr($bin, 0, 8)) . '/64' : $ip;
+}
+
 /**
- * @param bool|null $evento null = consultar; false = registrar falha; true = sucesso (zera)
- * @return int segundos de bloqueio restantes, 0 = liberado
+ * @param bool|null $evento null = consultar; false = reservar uma tentativa; true = sucesso (zera)
+ * @return int segundos de bloqueio restantes, 0 = liberado (com false: tentativa contada)
  */
 function login_throttle(string $ip, ?bool $evento = null, ?int $agora = null, ?string $dir = null): int {
     $agora = $agora ?? time();
-    $arq   = ($dir ?? sys_get_temp_dir()) . '/sp_login_' . hash('sha256', $ip);
+    $arq   = ($dir ?? sys_get_temp_dir()) . '/sp_login_' . hash('sha256', login_throttle_chave($ip));
     if ($evento === true) { @unlink($arq); return 0; }
-    [$n, $ultimo] = array_map('intval', explode(' ', (string)@file_get_contents($arq)) + [0, 0]);
+    $fh = @fopen($arq, 'c+');
+    if ($fh === false || !flock($fh, LOCK_EX)) {
+        if ($fh) { fclose($fh); }
+        error_log('sp_viewer: contador de login indisponivel em ' . dirname($arq) . ', login bloqueado');
+        return LOGIN_JANELA;
+    }
+    [$n, $ultimo] = array_map('intval', explode(' ', (string)stream_get_contents($fh)) + [0, 0]);
     if ($agora - $ultimo > LOGIN_JANELA) { $n = 0; }
-    if ($evento === false) {
+    $espera = $n >= LOGIN_MAX_FALHAS ? max(0, LOGIN_JANELA - ($agora - $ultimo)) : 0;
+    if ($evento === false && $espera === 0) {
         $n++;
         $ultimo = $agora;
-        @file_put_contents($arq, "$n $ultimo", LOCK_EX);
+        if (!ftruncate($fh, 0) || !rewind($fh) || fwrite($fh, "$n $ultimo") === false || !fflush($fh)) {
+            error_log('sp_viewer: contador de login nao gravavel em ' . dirname($arq) . ', login bloqueado');
+            $espera = LOGIN_JANELA;
+        }
     }
-    return $n >= LOGIN_MAX_FALHAS ? max(0, LOGIN_JANELA - ($agora - $ultimo)) : 0;
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return $espera;
 }
 
 /**
@@ -238,6 +288,13 @@ function pdo(array $cfg): PDO {
         http_response_code(500);
         exit('Erro de conexão com o banco. Verifique as credenciais de ambiente.');
     }
+    // Teto de consulta imposto pelo banco: set_time_limit() nao conta o tempo
+    // gasto dentro do MySQL. MariaDB usa max_statement_time (segundos); MySQL
+    // usa max_execution_time (milissegundos). A que o servidor nao conhece falha
+    // e e ignorada.
+    foreach (['SET SESSION max_statement_time=20', 'SET SESSION max_execution_time=20000'] as $teto) {
+        try { $pdo->exec($teto); break; } catch (Throwable $e) { /* variavel de outro servidor */ }
+    }
     return $pdo;
 }
 
@@ -252,7 +309,7 @@ function fail_setup(string $msg): void {
     echo "  SetEnv SP_DB_PASS   ********\n";
     echo "  SetEnv SP_APP_HASH  \$2y\$...   (hash da senha de acesso)\n";
     echo "  SetEnv SP_STORAGE   /caminho/para/storage/uploads\n";
-    echo "  SetEnv SP_ALLOW_IPS 200.0.0.1,10.0.0.0   (opcional)\n\n";
+    echo "  SetEnv SP_ALLOW_IPS 203.0.113.10,198.51.100.7   (opcional; IPs exatos, sem faixa)\n\n";
     echo "Gere o hash da senha de acesso com:\n";
     echo "  php -r 'echo password_hash(\"SUA_SENHA\", PASSWORD_DEFAULT), \"\\n\";'\n";
     echo "</pre>";
@@ -262,10 +319,23 @@ function fail_setup(string $msg): void {
 /* =====================================================================
  * Autenticação (senha compartilhada)
  * ===================================================================== */
-if (isset($_GET['logout'])) {
-    $_SESSION = [];
-    session_destroy();
-    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+/* Destino dos redirecionamentos: sempre o proprio script, nunca o caminho
+ * bruto da requisicao (REQUEST_URI aceitava //host/.. e virava Location externo). */
+function self_url(): string {
+    $s = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+    return preg_match('~^/(?!/)[A-Za-z0-9._/-]*\z~', $s) ? $s : '/';
+}
+
+/* Logout so por POST com o token da sessao: um GET (link, imagem em HTML de
+ * chamado, pagina de terceiro) nao encerra a sessao de ninguem. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['logout'])) {
+    $tok = $_POST['csrf'] ?? null;
+    $ref = (string)($_SESSION['csrf'] ?? '');
+    if (!empty($_SESSION['auth']) && $ref !== '' && is_string($tok) && hash_equals($ref, $tok)) {
+        $_SESSION = [];
+        session_destroy();
+    }
+    header('Location: ' . self_url());
     exit;
 }
 
@@ -275,23 +345,24 @@ if ($CFG['app_hash'] === '') {
 
 if (empty($_SESSION['auth'])) {
     $err = '';
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password']) && is_string($_POST['password'])) {
         $ip     = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
-        $espera = login_throttle($ip);
+        // Reserva a tentativa ANTES de verificar a senha (checar e contar juntos).
+        $espera = login_throttle($ip, false);
         if ($espera > 0) {
             http_response_code(429);
             header('Retry-After: ' . $espera);
             render_login('Muitas tentativas. Aguarde ' . (int)ceil($espera / 60) . ' min.');
             exit;
         }
-        if (password_verify((string)$_POST['password'], $CFG['app_hash'])) {
+        if (password_verify($_POST['password'], $CFG['app_hash'])) {
             login_throttle($ip, true);
             session_regenerate_id(true);
             $_SESSION['auth'] = true;
-            header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+            $_SESSION['csrf'] = bin2hex(random_bytes(32));
+            header('Location: ' . self_url());
             exit;
         }
-        login_throttle($ip, false);
         $err = 'Senha incorreta.';
         usleep(600000); // pequeno atraso anti-bruteforce
     }
@@ -424,7 +495,9 @@ function render_search(PDO $db): void {
         $cls = $k === $tab ? ' class="on"' : '';
         echo '<a' . $cls . ' href="?tab=' . $k . '">' . $label . '</a>';
     }
-    echo '<a class="logout" href="?logout=1">sair</a>';
+    if (empty($_SESSION['csrf'])) { $_SESSION['csrf'] = bin2hex(random_bytes(32)); }
+    echo '<form class="logout" method="post"><input type="hidden" name="csrf" value="' . h($_SESSION['csrf']) . '">'
+       . '<button type="submit" name="logout" value="1">sair</button></form>';
     echo '</nav>';
 
     // Formulário de busca
@@ -856,7 +929,11 @@ function rewrite_media_urls(string $html): string {
  */
 function render_html_frame(string $html): string {
     $html = rewrite_media_urls($html);
-    $srcdoc = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank">'
+    // Politica propria do documento de terceiro: nada de script, objeto, quadro,
+    // formulario ou conexao; so imagem e midia da propria aplicacao e estilo em linha.
+    $srcdoc = '<!doctype html><meta charset="utf-8">'
+            . '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src \'self\' data:; media-src \'self\'; style-src \'unsafe-inline\'; form-action \'none\'">'
+            . '<meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank">'
             . '<style>*{box-sizing:border-box}body{margin:0;padding:12px;font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#1a1a1a;word-wrap:break-word;overflow-x:hidden}'
             . 'img{max-width:100%;height:auto}'
             // display:block + overflow-x:auto no próprio <table> permite rolagem
@@ -867,8 +944,7 @@ function render_html_frame(string $html): string {
             . 'blockquote{border-left:3px solid #ccc;margin:0;padding-left:12px;color:#555}'
             . 'pre{white-space:pre-wrap;word-break:break-word;background:#f6f6f6;padding:8px;border-radius:4px}</style>'
             . $html;
-    return '<iframe class="render" sandbox="allow-same-origin" srcdoc="' . h($srcdoc) . '" '
-         . 'onload="spResizeIframe(this)"></iframe>';
+    return '<iframe class="render" sandbox="allow-same-origin" srcdoc="' . h($srcdoc) . '"></iframe>';
 }
 
 /* =====================================================================
@@ -881,7 +957,7 @@ function layout_head(string $title): void {
     $bodyClass = (($_COOKIE['sp_theme'] ?? '') === 'light') ? ' class="light"' : '';
     echo '<style>' . css() . '</style></head><body' . $bodyClass . '><div class="wrap">';
     echo '<div class="brand">arquivo&nbsp;morto · <strong>SupportPal</strong> <span class="muted">somente leitura</span>';
-    echo '<button type="button" class="theme-btn" onclick="spToggleTheme()">tema</button>';
+    echo '<button type="button" class="theme-btn" id="sp_theme_btn">tema</button>';
     echo '</div>';
     echo theme_js();
     echo iframe_resize_js();
@@ -890,10 +966,10 @@ function layout_foot(): void { echo '</div></body></html>'; }
 
 /* JS mínimo: alterna a classe .light no body e grava a escolha em cookie (1 ano). */
 function theme_js(): string {
-    return '<script>function spToggleTheme(){'
+    return '<script nonce="' . h(csp_nonce()) . '">function spToggleTheme(){'
          . 'var b=document.body,on=b.classList.toggle("light");'
          . 'document.cookie="sp_theme="+(on?"light":"dark")+";path=/;max-age=31536000;samesite=Lax";'
-         . '}</script>';
+         . '}document.getElementById("sp_theme_btn").addEventListener("click",spToggleTheme);</script>';
 }
 
 /**
@@ -906,8 +982,8 @@ function theme_js(): string {
  * suporte a ResizeObserver, reconfere algumas vezes nos primeiros segundos.
  */
 function iframe_resize_js(): string {
-    return <<<'JS'
-<script>
+    return '<script nonce="' . h(csp_nonce()) . '">' . <<<'JS'
+
 function spResizeIframe(ifr){
   function sync(){
     try{ ifr.style.height=(ifr.contentWindow.document.body.scrollHeight+24)+'px'; }catch(e){}
@@ -919,6 +995,14 @@ function spResizeIframe(ifr){
     else { [150,400,900,2000].forEach(function(t){ setTimeout(sync,t); }); }
   }catch(e){}
 }
+// O evento load de iframe nao borbulha, mas e visto na fase de captura. Assim o
+// ajuste vale para todo iframe.render sem atributo onload (que a CSP bloqueia).
+document.addEventListener('load',function(e){
+  var t=e.target; if(t&&t.tagName==='IFRAME'&&t.classList.contains('render')) spResizeIframe(t);
+},true);
+document.addEventListener('DOMContentLoaded',function(){
+  [].forEach.call(document.querySelectorAll('iframe.render'),spResizeIframe);
+});
 </script>
 JS;
 }
@@ -926,8 +1010,8 @@ JS;
 /* JS do autocomplete de tags: consulta ?tags=termo e preenche a lista.
  * Ao escolher uma sugestão, joga o nome no <select> (como opção) e submete. */
 function tag_autocomplete_js(): string {
-    return <<<'JS'
-<script>
+    return '<script nonce="' . h(csp_nonce()) . '">' . <<<'JS'
+
 (function(){
   var inp=document.getElementById('tagac'), box=document.getElementById('tagac_list');
   if(!inp) return;
@@ -945,8 +1029,9 @@ function tag_autocomplete_js(): string {
         rows.forEach(function(r){
           var d=document.createElement('div'); d.className='tagac-item';
           var c=(/^#[0-9a-f]{3,6}$/i.test(r.colour))?r.colour:'#888';
-          d.innerHTML='<span class="dot" style="background:'+c+'"></span>'+
-            r.name.replace(/[<>&]/g,'')+' <span class="muted">('+r.usos+')</span>';
+          var dot=document.createElement('span'); dot.className='dot'; dot.style.background=c;
+          var cnt=document.createElement('span'); cnt.className='muted'; cnt.textContent='('+r.usos+')';
+          d.appendChild(dot); d.appendChild(document.createTextNode(r.name+' ')); d.appendChild(cnt);
           d.onclick=function(){pick(r.name);};
           box.appendChild(d);
         });
@@ -994,7 +1079,9 @@ a:hover{color:var(--acc)}
 .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:18px}
 .tabs a{padding:9px 16px;color:var(--mut);font-size:14px;border-bottom:2px solid transparent}
 .tabs a.on{color:var(--acc);border-color:var(--acc)}
-.tabs .logout{margin-left:auto;color:var(--mut)}
+.tabs .logout{margin-left:auto;display:flex}
+.tabs .logout button{padding:9px 16px;color:var(--mut);font:inherit;font-size:14px;background:none;border:0;border-bottom:2px solid transparent;cursor:pointer}
+.tabs .logout button:hover{color:var(--acc)}
 .search{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;align-items:center}
 .search input[type=search]{flex:1;min-width:240px}
 input,select,button{background:var(--panel);border:1px solid var(--line);color:var(--txt);padding:9px 11px;border-radius:6px;font:inherit;font-size:14px}
