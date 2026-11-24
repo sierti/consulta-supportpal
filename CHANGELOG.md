@@ -76,5 +76,5 @@ responsividade da interface.
 ## [0.x] - antes do versionamento formal
 
 Histórico anterior a esta numeração não foi versionado formalmente; ver o
-[histórico de commits](https://github.com/ergti/consulta-supportpal/commits/main)
+[histórico de commits](https://github.com/sierti/consulta-supportpal/commits/main)
 no GitHub.

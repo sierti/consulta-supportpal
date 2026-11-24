@@ -135,7 +135,7 @@ const PER_PAGE = 25;
 /* Versão exibida na tela de login (link pro changelog no GitHub). Atualizar
  * a cada mudança relevante, seguindo semver (semver.org) e o CHANGELOG.md. */
 const APP_VERSION = '1.1.0';
-const APP_REPO_URL = 'https://github.com/ergti/consulta-supportpal';
+const APP_REPO_URL = 'https://github.com/sierti/consulta-supportpal';
 
 /* ---------------------------------------------------------------------
  * Mime types seguros para exibir inline no navegador (serve_media). Fora
