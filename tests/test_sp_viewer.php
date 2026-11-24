@@ -142,6 +142,52 @@ want_true('iframe de terceiro tem politica propria',
     strpos($src, "default-src \\'none\\'; img-src \\'self\\' data:") !== false);
 array_map('unlink', glob("$dir/sp_login_*") ?: []); @rmdir($dir);
 
+echo "\n── allowlist de IP (L-01 a L-05) ──\n";
+foreach (['ip_bin', 'ip_regras', 'ip_casa', 'client_ip'] as $fn) {
+    if (!preg_match('/^function ' . $fn . '\(.*?\n\}/ms', $src, $mm)) {
+        fwrite(STDERR, "ABORTADO: nao achei $fn() em sp_viewer.php\n"); exit(2);
+    }
+    eval($mm[0]);
+}
+function libera(string $remoto, string $lista, string $proxies = '', ?string $xff = null): bool {
+    global $CFG;
+    $CFG = ['trusted_proxies' => $proxies];
+    $_SERVER['REMOTE_ADDR'] = $remoto;
+    if ($xff === null) { unset($_SERVER['HTTP_X_FORWARDED_FOR']); } else { $_SERVER['HTTP_X_FORWARDED_FOR'] = $xff; }
+    $regras = @ip_regras($lista, 'teste');
+    $cli = ip_bin(@client_ip());
+    return $regras && $cli !== null && ip_casa($cli, $regras);
+}
+ini_set('error_log', '/dev/null');
+want('IP exato listado passa',                    libera('203.0.113.10', '203.0.113.10'), true);
+want('IP fora e negado',                          libera('198.51.100.9', '203.0.113.10'), false);
+want('prefixo de texto nao casa',                 libera('203.0.113.10', '203.0.113.1'), false);
+want('faixa CIDR: dentro passa',                  libera('203.0.113.10', '203.0.113.0/24'), true);
+want('faixa CIDR: fora e negado',                 libera('203.0.114.10', '203.0.113.0/24'), false);
+want('/20 com bits parciais: dentro',             libera('203.0.127.1', '203.0.112.0/20'), true);
+want('/20 com bits parciais: fora',               libera('203.0.128.1', '203.0.112.0/20'), false);
+want('IPv6 em maiusculas casa',                   libera('2001:db8::1', '2001:DB8::1'), true);
+want('IPv6 por extenso casa',                     libera('2001:db8::1', '2001:0db8:0:0:0:0:0:1'), true);
+want('IPv4 mapeado (::ffff:) casa com o IPv4',    libera('::ffff:203.0.113.10', '203.0.113.10'), true);
+want('IPv4 nao casa com faixa IPv6',              libera('203.0.113.10', '2001:db8::/32'), false);
+want('virgula sobrando nao libera IP vazio',      libera('', '203.0.113.10,'), false);
+want('lista so com item invalido nega',           libera('203.0.113.10', 'abc,203.0.113.0/99'), false);
+want('item invalido nao derruba os validos',      libera('203.0.113.10', 'abc,203.0.113.10'), true);
+want('sem proxy confiavel, X-Forwarded-For e ignorado', libera('198.51.100.9', '203.0.113.10', '', '203.0.113.10'), false);
+want('proxy confiavel: cliente listado passa',    libera('192.0.2.5', '203.0.113.10', '192.0.2.0/24', '203.0.113.10'), true);
+want('proxy confiavel: cliente fora e negado',    libera('192.0.2.5', '203.0.113.10', '192.0.2.0/24', '198.51.100.9'), false);
+want('IP forjado a esquerda do XFF nao vale',     libera('192.0.2.5', '203.0.113.10', '192.0.2.0/24', '203.0.113.10, 198.51.100.9'), false);
+want('dois proxies na cadeia: cliente listado',   libera('192.0.2.5', '203.0.113.10', '192.0.2.0/24', '203.0.113.10, 192.0.2.9'), true);
+want('lixo no XFF nega',                          libera('192.0.2.5', '203.0.113.10', '192.0.2.0/24', '203.0.113.10, lixo'), false);
+want('proxy fora da lista confiavel: XFF ignorado', libera('192.0.3.5', '203.0.113.10', '192.0.2.0/24', '203.0.113.10'), false);
+unset($_SERVER['HTTP_X_FORWARDED_FOR']);
+want_true('env_val le tambem REDIRECT_<nome>',    strpos($src, "\$r = 'REDIRECT_' . \$k;") !== false);
+$p_allow = strpos($src, "if (\$CFG['allow_ips'] !== '') {");
+$p_sess  = strpos($src, 'session_start();');
+want_true('sessao so abre depois da allowlist',   $p_allow !== false && $p_sess !== false && $p_allow < $p_sess);
+want('session_start aparece uma vez so',          substr_count($src, 'session_start();'), 1);
+want_true('limite de login usa o mesmo IP da allowlist', (bool)preg_match('/\$ip\s*=\s*client_ip\(\);/', $src));
+
 echo $falhas === 0
     ? "\nOK, todas as verificacoes passaram\n"
     : "\n$falhas verificacao(oes) falharam\n";

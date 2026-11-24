@@ -80,11 +80,13 @@ Um único arquivo, roteado por query string, sem front controller/framework:
 - Sair é um formulário POST com token da sessão (ver §6.6).
 - Camada extra de rede: `<RequireAny>` no `.htaccess` (allowlist de IP/CIDR do
   Apache), essa é a trava principal. Existe também um allowlist opcional
-  `SP_ALLOW_IPS` verificado em PHP (`$_SERVER['REMOTE_ADDR']`), redundante com
-  o `.htaccess`. Ele compara **IP exato** (não aceita faixa/CIDR). Atrás de
-  proxy reverso sem `mod_remoteip`, `REMOTE_ADDR` é o IP do proxy: nesse
-  cenário o allowlist e o limite de tentativas enxergam todos os visitantes
-  como um só.
+  `SP_ALLOW_IPS` verificado em PHP, redundante com o `.htaccess`. Aceita IP
+  ou faixa CIDR, IPv4 e IPv6, comparados em binário (`inet_pton`). É checado
+  **antes** de abrir a sessão e falha fechada: lista sem item válido ou IP de
+  cliente ilegível nega. Atrás de proxy reverso, declarar o proxy em
+  `SP_TRUSTED_PROXIES`; só então o `X-Forwarded-For` é lido, da direita para a
+  esquerda. Allowlist e limite de tentativas usam o mesmo IP (`client_ip()`).
+  Detalhe em §6.8.
 
 ### Renderização de conteúdo de terceiros
 Artigos e mensagens de ticket guardam HTML (`purified_text`/`text`) vindo do
@@ -124,7 +126,8 @@ atributo `onload`) medindo o `scrollHeight` do documento interno.
 | `SP_DB_PASS` | **sim** | Senha do usuário MySQL |
 | `SP_APP_HASH` | **sim** | Hash bcrypt da senha de acesso à interface (`password_hash()`) |
 | `SP_STORAGE` | não, mas sem ela mídia não funciona | Caminho físico absoluto da raiz `storage/app` do SupportPal original |
-| `SP_ALLOW_IPS` | não | CSV de IPs, allowlist redundante em PHP |
+| `SP_ALLOW_IPS` | não | CSV de IPs ou faixas CIDR (IPv4/IPv6), allowlist redundante em PHP |
+| `SP_TRUSTED_PROXIES` | não | CSV de IPs ou faixas CIDR dos proxies reversos cujo `X-Forwarded-For` é aceito |
 
 Se `SP_APP_HASH` ou credenciais de banco faltarem, o app mostra uma tela de
 "CONFIGURAÇÃO INCOMPLETA" com instruções (`fail_setup()`) em vez de quebrar
@@ -420,7 +423,7 @@ navegador real. Tudo corrigido na v1.1.0:
 | Cookie de sessão | Nome padrão `PHPSESSID`, `Secure` condicional | `SPVSESSID`, `Secure` sempre |
 | Consulta lenta | Só `set_time_limit(20)`, que não conta tempo de banco | `max_statement_time` (MariaDB) ou `max_execution_time` (MySQL) de 20 s por sessão |
 | Cópias de segurança | `.htaccess.bak.*` e `sp_local_config.php.bak.*` não eram ignorados pelo git | `.gitignore` cobre os dois prefixos e `*.bak*` |
-| Exemplo de `SP_ALLOW_IPS` | Mostrava faixa CIDR, que o código não interpreta | Exemplo com IPs exatos |
+| Exemplo de `SP_ALLOW_IPS` | Mostrava faixa CIDR, que o código não interpretava | Exemplo com IPs exatos (na 1.2.0 a faixa CIDR passou a valer, §6.8) |
 
 **Ao atualizar uma instância da 1.0.0 para a 1.1.0:**
 
@@ -466,6 +469,30 @@ morre calado: rodar com `php -d disable_functions= tests/test_sp_viewer.php`.
 - **Banco:** usuário do visor reduzido de `ALL PRIVILEGES` a `SELECT`.
   Prova com a credencial do próprio visor: leitura responde e `CREATE TABLE`
   é negado.
+
+### 6.8 Allowlist de IP em PHP: correções da 1.2.0 (2026-11-24)
+
+Auditoria da lógica de `SP_ALLOW_IPS`. Nenhuma das instâncias em produção
+configura a variável, então nenhuma estava exposta; a correção é do código.
+
+| ID | Antes | Depois |
+|---|---|---|
+| L-01 | `SetEnv` que o Apache entrega como `REDIRECT_SP_ALLOW_IPS` (após rewrite interno) não era lido: allowlist desligada sem aviso | `env_val()` lê também `REDIRECT_<nome>` |
+| L-02 | Vírgula sobrando criava item vazio que casava com `REMOTE_ADDR` vazio | Item vazio é descartado; item inválido é descartado e vai para o log; lista sem item válido nega tudo |
+| L-03 | Comparação de texto exato: sem CIDR, IPv6 sensível a maiúscula e a forma abreviada, `::ffff:` não casava com o IPv4 | Comparação binária com máscara CIDR; `::ffff:a.b.c.d` vira IPv4 |
+| L-04 | Atrás de proxy, `REMOTE_ADDR` é o proxy: todos os visitantes viravam um só | `SP_TRUSTED_PROXIES`; `X-Forwarded-For` só é lido vindo de proxy declarado, da direita para a esquerda, e salto ilegível nega |
+| L-05 | Sessão era criada antes da checagem: IP negado recebia cookie e gerava arquivo de sessão | Sessão abre só depois da allowlist |
+
+Testes: seção "allowlist de IP" de `tests/test_sp_viewer.php` (25 casos,
+inclusive `X-Forwarded-For` forjado à esquerda e lixo na cadeia). Controle
+negativo: a mesma bateria comportamental contra o arquivo anterior falhou em
+23 de 28 casos.
+
+**Ao atualizar uma instância para a 1.2.0:** quem usa `SP_ALLOW_IPS` atrás de
+proxy reverso precisa declarar o proxy em `SP_TRUSTED_PROXIES`, senão o
+allowlist enxerga só o IP do proxy (mesmo comportamento de antes). Lista com
+erro de digitação, que antes liberava ou negava de forma imprevisível, agora
+nega todos e registra o item no log de erro do PHP.
 
 ## 7. Replicando para outro provedor/cliente
 

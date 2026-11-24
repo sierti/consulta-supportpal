@@ -22,5 +22,6 @@ return [
     // Gere com: php -r 'echo password_hash("SUA_SENHA", PASSWORD_DEFAULT), "\n";'
     'SP_APP_HASH' => '$2y$10$SUBSTITUA_PELO_HASH_GERADO',
     'SP_STORAGE'  => '/home/USUARIO/domains/DOMINIO_SUPPORTPAL/public_html/storage/app',
-    // 'SP_ALLOW_IPS' => '203.0.113.1,203.0.113.2',
+    // 'SP_ALLOW_IPS' => '203.0.113.1,198.51.100.0/24',
+    // 'SP_TRUSTED_PROXIES' => '192.0.2.10',
 ];

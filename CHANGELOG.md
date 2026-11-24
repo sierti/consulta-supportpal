@@ -3,6 +3,26 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Este projeto segue [versionamento semântico](https://semver.org/lang/pt-BR/).
 
+## [1.2.0] - 2026-11-24
+
+Correções da auditoria do allowlist `SP_ALLOW_IPS` (detalhe em
+`DOCUMENTATION.md` §6.8).
+
+### Segurança
+- `SP_ALLOW_IPS` passa a ser lido também como `REDIRECT_SP_ALLOW_IPS`
+  (antes ficava desligado sem aviso após rewrite interno do Apache).
+- Item vazio ou inválido na lista não libera mais ninguém; lista sem item
+  válido nega todos (falha fechada) e o item ruim vai para o log.
+- Sessão só é aberta depois da checagem de IP: IP negado não recebe cookie
+  nem gera arquivo de sessão.
+
+### Adicionado
+- Faixa CIDR e comparação binária de IPv4/IPv6 no allowlist (`::ffff:`
+  casa com o IPv4).
+- `SP_TRUSTED_PROXIES`: com proxy declarado, o IP do cliente vem do
+  `X-Forwarded-For` (lido da direita para a esquerda). Vale para o allowlist
+  e para o limite de tentativas de login.
+
 ## [1.1.0] - 2026-11-24
 
 Correções da auditoria de segurança de 2026-11-24 (detalhe em

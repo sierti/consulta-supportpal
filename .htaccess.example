@@ -51,6 +51,9 @@ DirectoryIndex sp_viewer.php
 # `upload.folder`: public, tickets, email_log). Normalmente:
 #   {caminho_da_instalacao_supportpal}/storage/app
 # SetEnv SP_STORAGE   /home/USUARIO/domains/DOMINIO_SUPPORTPAL/public_html/storage/app
-# Allowlist de IP adicional por aplicação (CSV, opcional; IPs exatos, sem faixa/CIDR;
-# a trava principal é o RequireAny acima)
-# SetEnv SP_ALLOW_IPS 203.0.113.1,203.0.113.2
+# Allowlist de IP adicional por aplicação (CSV, opcional; IP ou faixa CIDR,
+# IPv4 ou IPv6; a trava principal é o RequireAny acima)
+# SetEnv SP_ALLOW_IPS 203.0.113.1,198.51.100.0/24
+# Proxy reverso na frente do site (CSV, opcional): só com ele declarado o
+# X-Forwarded-For é aceito como IP do cliente
+# SetEnv SP_TRUSTED_PROXIES 192.0.2.10

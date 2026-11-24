@@ -50,28 +50,8 @@ header("Content-Security-Policy: default-src 'self'; img-src 'self' data:; style
      . "script-src 'nonce-" . $SP_NONCE . "'; frame-src 'self'; base-uri 'none'; "
      . "form-action 'self'; frame-ancestors 'none'");
 
-ini_set('session.use_strict_mode', '1');
-// Nome proprio: nao divide o cookie PHPSESSID com outra aplicacao PHP do dominio.
-session_name('SPVSESSID');
-session_set_cookie_params([
-    'lifetime' => 0,
-    'path'     => '/',
-    // Sempre Secure: a aplicacao so funciona em HTTPS (em HTTP puro o navegador
-    // nao devolve o cookie e o login nao se mantem, de proposito).
-    'secure'   => true,
-    'httponly' => true,
-    'samesite' => 'Lax',
-]);
-session_start();
-
-// Timeout de sessão por inatividade (30 min): mitiga sessão esquecida aberta
-// em navegador compartilhado, já que a senha de acesso é única e compartilhada.
-const SESSION_IDLE_TIMEOUT = 1800;
-if (!empty($_SESSION['auth']) && (time() - ($_SESSION['sp_last_seen'] ?? 0) > SESSION_IDLE_TIMEOUT)) {
-    $_SESSION = [];
-    session_destroy();
-}
-$_SESSION['sp_last_seen'] = time();
+/* Sessao: aberta so DEPOIS da allowlist de IP (mais abaixo), para que um IP
+ * negado nao receba cookie nem gere arquivo de sessao no servidor. */
 
 date_default_timezone_set('America/Sao_Paulo');
 
@@ -103,6 +83,13 @@ function env_val(string $k, string $default = ''): string {
     if (isset($SP_LOCAL_CONFIG[$k]) && $SP_LOCAL_CONFIG[$k] !== '') return (string)$SP_LOCAL_CONFIG[$k];
     if (isset($_SERVER[$k]) && $_SERVER[$k] !== '') return (string)$_SERVER[$k];
     $v = getenv($k);
+    if ($v !== false && $v !== '') return (string)$v;
+    // Apache entrega SetEnv como REDIRECT_<nome> depois de redirecionamento
+    // interno (e em alguns modos CGI). Sem esta leitura a allowlist desligava
+    // calada nesses hosts.
+    $r = 'REDIRECT_' . $k;
+    if (isset($_SERVER[$r]) && $_SERVER[$r] !== '') return (string)$_SERVER[$r];
+    $v = getenv($r);
     return ($v !== false && $v !== '') ? (string)$v : $default;
 }
 
@@ -119,6 +106,9 @@ $CFG = [
     'storage'   => env_val('SP_STORAGE'),
     // Allowlist de IP por aplicação (CSV). Opcional; a trava principal é o .htaccess (RequireAny).
     'allow_ips' => env_val('SP_ALLOW_IPS'),
+    // Proxies reversos confiaveis (CSV de IP ou faixa CIDR). Opcional. So quando a
+    // conexao vem de um deles o IP do visitante e lido do X-Forwarded-For.
+    'trusted_proxies' => env_val('SP_TRUSTED_PROXIES'),
 ];
 
 /* ---------------------------------------------------------------------
@@ -134,7 +124,7 @@ const PER_PAGE = 25;
 
 /* Versão exibida na tela de login (link pro changelog no GitHub). Atualizar
  * a cada mudança relevante, seguindo semver (semver.org) e o CHANGELOG.md. */
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const APP_REPO_URL = 'https://github.com/sierti/consulta-supportpal';
 
 /* ---------------------------------------------------------------------
@@ -176,14 +166,104 @@ const CURATED_TAGS = [
 /* =====================================================================
  * Allowlist de IP (se configurada)
  * ===================================================================== */
+
+/* Endereco em binario (inet_pton), com IPv4 mapeado em IPv6 (::ffff:a.b.c.d)
+ * reduzido ao IPv4. Assim grafias diferentes do mesmo IP (maiusculas, zeros
+ * por extenso, forma mapeada) comparam iguais. null = nao e IP. */
+function ip_bin(string $ip): ?string {
+    $b = @inet_pton(trim($ip));
+    if ($b === false) return null;
+    if (strlen($b) === 16 && strncmp($b, str_repeat("\0", 10) . "\xff\xff", 12) === 0) $b = substr($b, 12);
+    return $b;
+}
+
+/* Lista CSV de IPs e faixas CIDR. Item vazio (virgula sobrando) e ignorado;
+ * item invalido e ignorado e registrado no log. Devolve [[rede_bin, bits], ...]. */
+function ip_regras(string $csv, string $nome): array {
+    $regras = [];
+    foreach (explode(',', $csv) as $item) {
+        $item = trim($item);
+        if ($item === '') continue;
+        $partes = explode('/', $item, 2);
+        $rede   = ip_bin($partes[0]);
+        $max    = $rede === null ? 0 : strlen($rede) * 8;
+        $bits   = isset($partes[1]) ? (ctype_digit($partes[1]) ? (int)$partes[1] : -1) : $max;
+        if ($rede === null || $bits < 0 || $bits > $max) {
+            error_log("sp_viewer: $nome tem item invalido, ignorado: " . $item);
+            continue;
+        }
+        $regras[] = [$rede, $bits];
+    }
+    return $regras;
+}
+
+function ip_casa(string $bin, array $regras): bool {
+    foreach ($regras as [$rede, $bits]) {
+        if (strlen($rede) !== strlen($bin)) continue;
+        $cheios = intdiv($bits, 8);
+        if (strncmp($rede, $bin, $cheios) !== 0) continue;
+        $resto = $bits % 8;
+        if ($resto === 0) return true;
+        $mascara = (0xFF << (8 - $resto)) & 0xFF;
+        if ((ord($rede[$cheios]) & $mascara) === (ord($bin[$cheios]) & $mascara)) return true;
+    }
+    return false;
+}
+
+/* IP do visitante. Sem SP_TRUSTED_PROXIES e o REMOTE_ADDR. Com proxies
+ * confiaveis, e so quando a conexao vem de um deles, percorre o
+ * X-Forwarded-For da direita para a esquerda e fica com o primeiro endereco
+ * que nao e proxy confiavel (o que o cliente escreve a esquerda nao e lido).
+ * Item invalido no caminho devolve '' (nenhum IP: a allowlist nega).
+ * Devolve o IP normalizado em texto, ou '' se nao houver IP valido. */
+function client_ip(): string {
+    global $CFG;
+    $remoto = ip_bin((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+    if ($remoto === null) return '';
+    $proxies = ip_regras($CFG['trusted_proxies'], 'SP_TRUSTED_PROXIES');
+    if (!$proxies || !ip_casa($remoto, $proxies)) return inet_ntop($remoto);
+    $saltos = array_reverse(explode(',', (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '')));
+    foreach ($saltos as $salto) {
+        if (trim($salto) === '') continue;
+        $b = ip_bin($salto);
+        if ($b === null) return '';
+        if (!ip_casa($b, $proxies)) return inet_ntop($b);
+    }
+    return inet_ntop($remoto);
+}
+
 if ($CFG['allow_ips'] !== '') {
-    $ip  = $_SERVER['REMOTE_ADDR'] ?? '';
-    $ok  = in_array($ip, array_map('trim', explode(',', $CFG['allow_ips'])), true);
-    if (!$ok) {
+    $regras = ip_regras($CFG['allow_ips'], 'SP_ALLOW_IPS');
+    $cli    = ip_bin(client_ip());
+    // Sem regra valida, ou sem IP de cliente, nega (falha fechada).
+    if (!$regras || $cli === null || !ip_casa($cli, $regras)) {
         http_response_code(403);
         exit('403: acesso negado para este IP.');
     }
 }
+
+ini_set('session.use_strict_mode', '1');
+// Nome proprio: nao divide o cookie PHPSESSID com outra aplicacao PHP do dominio.
+session_name('SPVSESSID');
+session_set_cookie_params([
+    'lifetime' => 0,
+    'path'     => '/',
+    // Sempre Secure: a aplicacao so funciona em HTTPS (em HTTP puro o navegador
+    // nao devolve o cookie e o login nao se mantem, de proposito).
+    'secure'   => true,
+    'httponly' => true,
+    'samesite' => 'Lax',
+]);
+session_start();
+
+// Timeout de sessão por inatividade (30 min): mitiga sessão esquecida aberta
+// em navegador compartilhado, já que a senha de acesso é única e compartilhada.
+const SESSION_IDLE_TIMEOUT = 1800;
+if (!empty($_SESSION['auth']) && (time() - ($_SESSION['sp_last_seen'] ?? 0) > SESSION_IDLE_TIMEOUT)) {
+    $_SESSION = [];
+    session_destroy();
+}
+$_SESSION['sp_last_seen'] = time();
 
 /* =====================================================================
  * Helpers
@@ -197,8 +277,8 @@ function h(?string $s): string { return htmlspecialchars((string)$s, ENT_QUOTES,
  * travado por flock do inicio ao fim: requisicoes simultaneas nao passam todas
  * pela checagem antes de a primeira contar. Sem conseguir abrir, travar ou
  * gravar o contador, a resposta e bloqueio (falha fechada).
- * Usa REMOTE_ADDR como a allowlist acima: atras de proxy reverso sem
- * X-Forwarded-For confiavel, todos os visitantes dividem o mesmo balde.
+ * Usa client_ip(), o mesmo IP da allowlist: atras de proxy reverso, sem
+ * SP_TRUSTED_PROXIES configurado, todos os visitantes dividem o mesmo balde.
  * IPv6 conta por prefixo /64, que e o que um mesmo assinante controla. */
 const LOGIN_MAX_FALHAS = 5;
 const LOGIN_JANELA     = 900;
@@ -309,7 +389,7 @@ function fail_setup(string $msg): void {
     echo "  SetEnv SP_DB_PASS   ********\n";
     echo "  SetEnv SP_APP_HASH  \$2y\$...   (hash da senha de acesso)\n";
     echo "  SetEnv SP_STORAGE   /caminho/para/storage/uploads\n";
-    echo "  SetEnv SP_ALLOW_IPS 203.0.113.10,198.51.100.7   (opcional; IPs exatos, sem faixa)\n\n";
+    echo "  SetEnv SP_ALLOW_IPS 203.0.113.10,198.51.100.7   (opcional; IP ou faixa CIDR)\n\n";
     echo "Gere o hash da senha de acesso com:\n";
     echo "  php -r 'echo password_hash(\"SUA_SENHA\", PASSWORD_DEFAULT), \"\\n\";'\n";
     echo "</pre>";
@@ -346,7 +426,8 @@ if ($CFG['app_hash'] === '') {
 if (empty($_SESSION['auth'])) {
     $err = '';
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password']) && is_string($_POST['password'])) {
-        $ip     = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+        $ip     = client_ip();
+        if ($ip === '') { $ip = '0.0.0.0'; }
         // Reserva a tentativa ANTES de verificar a senha (checar e contar juntos).
         $espera = login_throttle($ip, false);
         if ($espera > 0) {
