@@ -3,6 +3,37 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Este projeto segue [versionamento semântico](https://semver.org/lang/pt-BR/).
 
+## [1.1.0] - 2026-11-24
+
+Correções da auditoria de segurança de 2026-11-24 (detalhe em
+`DOCUMENTATION.md` §6.6).
+
+### Segurança
+- Limite de tentativas de login passou a ser atômico (`flock`, reserva antes
+  de conferir a senha) e falha fechada; IPv6 conta por /64.
+- Logout só por `POST` com token da sessão; `?logout=1` deixou de existir.
+- Redirecionamentos não usam mais `REQUEST_URI`.
+- `password` que não seja texto é recusado; `display_errors` desligado no
+  código e tratador global de exceção com resposta genérica.
+- `Content-Security-Policy` com nonce enviada pelo PHP, sem
+  `'unsafe-inline'` em script; demais cabeçalhos de segurança também saem
+  do PHP.
+- Conteúdo de tickets e artigos ganhou política própria dentro do iframe
+  (sem requisição externa, sem envio de formulário).
+- Autocomplete de tags sem `innerHTML`.
+- Cookie de sessão `SPVSESSID`, sempre `Secure`.
+- Limite de 20 s por consulta no banco.
+
+### Alterado
+- A aplicação exige HTTPS (cookie sempre `Secure`).
+- `.htaccess.example`: a CSP saiu do Apache; ficou só o HSTS.
+- `.gitignore` cobre cópias de segurança de `.htaccess` e
+  `sp_local_config.php`.
+
+### Atualização
+- Conferir se o diretório temporário do PHP é gravável antes de trocar o
+  arquivo. Quem estiver logado precisa entrar de novo uma vez.
+
 ## [1.0.0] - 2026-07-13
 
 Primeira versão numerada, consolidando a auditoria de segurança completa e a

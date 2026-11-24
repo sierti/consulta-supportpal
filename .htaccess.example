@@ -17,12 +17,16 @@ DirectoryIndex sp_viewer.php
     Require all denied
 </FilesMatch>
 
-# headers de segurança (exige mod_headers, já presente na maioria dos EA4)
+# Cabeçalhos de segurança: desde a v1.1.0 o próprio sp_viewer.php envia
+# X-Frame-Options, X-Content-Type-Options, Referrer-Policy e a
+# Content-Security-Policy (com nonce por requisição, que o Apache não tem
+# como gerar). Não defina Content-Security-Policy aqui: o navegador aplica as
+# duas ao mesmo tempo, então a daqui nunca afrouxa a do PHP, só pode quebrar
+# a tela se for mais restrita. Instância que veio de versão anterior pode
+# remover a linha "Header always set Content-Security-Policy ..." do
+# .htaccess real (a antiga, com 'unsafe-inline', convive sem quebrar).
+# Fica aqui só o HSTS (exige mod_headers).
 <IfModule mod_headers.c>
-  Header always set X-Frame-Options "DENY"
-  Header always set X-Content-Type-Options "nosniff"
-  Header always set Referrer-Policy "no-referrer"
-  Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-src 'self'"
   Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
 </IfModule>
 
@@ -47,5 +51,6 @@ DirectoryIndex sp_viewer.php
 # `upload.folder`: public, tickets, email_log). Normalmente:
 #   {caminho_da_instalacao_supportpal}/storage/app
 # SetEnv SP_STORAGE   /home/USUARIO/domains/DOMINIO_SUPPORTPAL/public_html/storage/app
-# Allowlist de IP adicional por aplicação (CSV, opcional; a trava principal é o RequireAny acima)
+# Allowlist de IP adicional por aplicação (CSV, opcional; IPs exatos, sem faixa/CIDR;
+# a trava principal é o RequireAny acima)
 # SetEnv SP_ALLOW_IPS 203.0.113.1,203.0.113.2

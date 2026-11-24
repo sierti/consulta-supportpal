@@ -69,6 +69,10 @@ fix in the attachment-serving endpoint (mime-type allowlist), plus session
 cookie and security-header hardening. Read that section before deploying to
 a new environment.
 
+A second audit (2026-11-24) led to version 1.1.0: atomic login rate limit,
+POST-only logout with a session token, and a nonce-based CSP sent by PHP.
+The app now requires HTTPS. See §6.6 and the [CHANGELOG](CHANGELOG.md).
+
 Real infrastructure details (hostnames, server accounts, internal paths)
 from any production deployment are intentionally kept out of this
 repository. See [DOCUMENTATION.md](DOCUMENTATION.md) for the generic setup

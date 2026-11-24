@@ -62,28 +62,41 @@ Um único arquivo, roteado por query string, sem front controller/framework:
 | `?view=ticket&id=N` | `render_ticket()` | Detalhe de um ticket com thread de mensagens/notas |
 | `?media=HASH` | `serve_media()` | Serve um anexo do disco (streaming, com validação de hash e path traversal) |
 | `?tags=termo` | `suggest_tags()` | Autocomplete de tags (JSON) |
-| `?logout=1` | (nenhuma função) | Encerra a sessão |
+| `POST logout` + `csrf` | (nenhuma função) | Encerra a sessão. Só por POST com o token da sessão (v1.1.0); `?logout=1` por GET não faz nada |
 | `?diag=1` (junto com `?view=ticket`) | `render_diag()` | Diagnóstico do mapeamento `by`/`type` de `ticket_message` (ver §5) |
 
 ### Autenticação
 - Senha única compartilhada (não há usuários individuais). Hash bcrypt em
   `SP_APP_HASH`, verificado com `password_verify()`.
-- Sessão PHP nativa (`session_start()`), sem "lembrar-me", com cookie
-  `Secure`/`HttpOnly`/`SameSite` e timeout de inatividade (ver §6.1).
-- Delay de 600ms em senha errada (mitigação simples de força bruta,
-  limitação conhecida, ver §6.1).
+- Sessão PHP nativa (`session_start()`), sem "lembrar-me", cookie próprio
+  `SPVSESSID` com `Secure` sempre ligado, `HttpOnly`, `SameSite=Lax` e timeout
+  de inatividade (ver §6.1 e §6.6). **A aplicação só funciona por HTTPS:** em
+  HTTP puro o navegador não devolve o cookie e o login não se mantém.
+- Limite de tentativas: 5 senhas erradas em 15 minutos bloqueiam o IP (IPv6
+  conta por bloco /64). O contador fica em arquivo no diretório temporário
+  do PHP, com trava (`flock`) e reserva antes de conferir a senha. Se o
+  arquivo não puder ser aberto ou gravado, o login é recusado (falha
+  fechada) e o motivo vai para o log de erro do PHP. Ver §6.6.
+- Sair é um formulário POST com token da sessão (ver §6.6).
 - Camada extra de rede: `<RequireAny>` no `.htaccess` (allowlist de IP/CIDR do
   Apache), essa é a trava principal. Existe também um allowlist opcional
   `SP_ALLOW_IPS` verificado em PHP (`$_SERVER['REMOTE_ADDR']`), redundante com
-  o `.htaccess`.
+  o `.htaccess`. Ele compara **IP exato** (não aceita faixa/CIDR). Atrás de
+  proxy reverso sem `mod_remoteip`, `REMOTE_ADDR` é o IP do proxy: nesse
+  cenário o allowlist e o limite de tentativas enxergam todos os visitantes
+  como um só.
 
 ### Renderização de conteúdo de terceiros
 Artigos e mensagens de ticket guardam HTML (`purified_text`/`text`) vindo do
 editor rico do SupportPal. Para exibir com fidelidade **sem risco de XSS**,
 `render_html_frame()` injeta esse HTML dentro de um `<iframe sandbox="allow-same-origin">`,
 sem `allow-scripts`, então qualquer `<script>` embutido no conteúdo antigo
-não executa. A altura do iframe é ajustada via JS (`onload`) medindo o
-`scrollHeight` do documento interno.
+não executa. Desde a v1.1.0 o documento interno leva uma política própria
+(`<meta http-equiv="Content-Security-Policy">` com `default-src 'none'`,
+imagens e mídia só da própria origem, `form-action 'none'`), então conteúdo
+antigo não dispara requisição para fora nem envia formulário. A altura do
+iframe é ajustada via JS (ouvinte de `load` registrado pela página, sem
+atributo `onload`) medindo o `scrollHeight` do documento interno.
 
 ### Anexos / mídia
 - URLs antigas do tipo `https://dominio-supportpal/download/{HASH}?...` dentro
@@ -350,15 +363,12 @@ bloqueava todo JS inline da aplicação) e `74535e5` (interface responsiva).
 - **`sp_viewer.php`** substituído pela versão dos dois commits.
 - **CSP no `.htaccess`** de produção ganhou `script-src 'self' 'unsafe-inline'`
   (faltava só esse trecho; resto do header preservado).
-- **Validação via HTTP real, contornando o Cloudflare Access** (§6.2/6.3
-  descobriram essa camada na frente do domínio): requisição direta ao IP de
-  origem do servidor com `Host:` forjado para o domínio chega direto no
-  Apache. Por coincidência, o IP de onde os testes rodaram já estava na
-  allowlist (adicionado numa sessão anterior), então a resposta veio como
-  a tela de login real, com os headers de produção completos, confirmando
-  que o `Content-Security-Policy` corrigido está de fato sendo enviado.
+- **Validação via HTTP real** a partir de um IP já presente na allowlist: a
+  resposta veio como a tela de login real, com os headers de produção
+  completos, confirmando que o `Content-Security-Policy` corrigido está de
+  fato sendo enviado.
 - **Validação visual com navegador real**, sem precisar da senha de acesso:
-  HTML autenticado de um ticket real com 9 anexos de imagem (nº 110926) e da
+  HTML autenticado de um ticket real com 9 anexos de imagem e da
   listagem de tickets foi capturado via CLI (sessão forçada, mesma técnica
   de §6.2/6.3), servido localmente por um servidor de teste que replica
   exatamente os headers de segurança do `.htaccess` de produção (incluindo o
@@ -389,6 +399,43 @@ negócio, banco ou config.
 - **Validado via PHP CLI** (sem sessão autenticada, direto na tela de
   login): confirmado o markup exato do rodapé, com os dois links
   apontando para as URLs corretas do repositório, `php -l` sem erros.
+
+### 6.6 Auditoria de 2026-11-24 e versão 1.1.0
+
+Auditoria de código em cinco frentes (injeção, autenticação e sessão,
+controle de acesso, exposição de dados e configuração), com reprodução local
+em banco fictício. Nenhum achado alto ou crítico. Um achado confirmado de
+severidade baixa, nove informativos e quatro hipóteses que dependiam de
+navegador real. Tudo corrigido na v1.1.0:
+
+| Item | O que era | Como ficou |
+|---|---|---|
+| Limite de login | Leitura e gravação do contador sem trava: tentativas em paralelo passavam do limite de 5 | `flock` exclusivo, tentativa reservada **antes** do `password_verify`, falha fechada se o arquivo não abrir, IPv6 agrupado por /64 |
+| Logout | `GET ?logout=1`, acionável por qualquer página ou por imagem dentro de um chamado | Só `POST` com token `csrf` da sessão |
+| Redirecionamento | `Location` montado com `REQUEST_URI` (caminho `//host/` virava redirecionamento externo) | `self_url()`: `SCRIPT_NAME` validado, senão `/` |
+| Senha em formato de lista | `password[]=x` gerava `TypeError` e, com `display_errors` ligado, expunha caminho do servidor | Exige `is_string`; `display_errors` desligado no código; tratador global devolve 500 genérico e registra no log |
+| CSP | Dependia do `.htaccess` e liberava `script-src 'unsafe-inline'` | Enviada pelo PHP com nonce por requisição; sem manipulador inline (`onclick`, `onload`); `base-uri 'none'`, `form-action 'self'`, `frame-ancestors 'none'` |
+| Conteúdo de terceiros | iframe sem política própria: imagem externa em chamado antigo gerava requisição para fora | Política `default-src 'none'` dentro do documento do iframe |
+| Autocomplete de tags | Montado com `innerHTML` | `createElement` e `textContent` |
+| Cookie de sessão | Nome padrão `PHPSESSID`, `Secure` condicional | `SPVSESSID`, `Secure` sempre |
+| Consulta lenta | Só `set_time_limit(20)`, que não conta tempo de banco | `max_statement_time` (MariaDB) ou `max_execution_time` (MySQL) de 20 s por sessão |
+| Cópias de segurança | `.htaccess.bak.*` e `sp_local_config.php.bak.*` não eram ignorados pelo git | `.gitignore` cobre os dois prefixos e `*.bak*` |
+| Exemplo de `SP_ALLOW_IPS` | Mostrava faixa CIDR, que o código não interpreta | Exemplo com IPs exatos |
+
+**Ao atualizar uma instância da 1.0.0 para a 1.1.0:**
+
+1. O diretório temporário do PHP (`sys_get_temp_dir()`) precisa ser gravável
+   pelo usuário do site. Se não for, ninguém entra (falha fechada) e o log de
+   erro do PHP diz o motivo. Conferir **antes** de trocar o arquivo.
+2. A sessão de quem estiver logado cai uma vez (mudou o nome do cookie).
+3. A linha `Content-Security-Policy` do `.htaccess` deixa de ser necessária
+   (ver comentário no `.htaccess.example`).
+4. Instância com constante ajustada localmente (ex.: `MSG_BY_OPERATOR`, §5)
+   não recebe o arquivo do repositório por cima: aplica-se só a diferença,
+   preservando o valor medido naquela instância.
+
+Testes: `php tests/test_sp_viewer.php` (inclui 20 processos concorrentes
+contra o limite de login e checagens de fonte para cada item acima).
 
 ## 7. Replicando para outro provedor/cliente
 

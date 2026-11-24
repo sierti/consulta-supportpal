@@ -1,5 +1,10 @@
-.htaccess
-sp_local_config.php
+# reais e qualquer copia de seguranca deles (.bak.DATA, .orig, etc.)
+.htaccess*
+!.htaccess.example
+sp_local_config.php*
+!sp_local_config.php.example
+*.bak
+*.bak.*
 .DS_Store
 .obsidian/
 

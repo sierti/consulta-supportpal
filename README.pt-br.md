@@ -72,6 +72,10 @@ para uma correção crítica de XSS armazenado no endpoint que serve anexos
 (allowlist de mime type), além de hardening de cookie de sessão e headers de
 segurança. Leia essa seção antes de implantar em um ambiente novo.
 
+Uma segunda auditoria, em 2026-11-24, resultou na versão 1.1.0 (limite de
+login atômico, logout por POST com token, CSP com nonce enviada pelo PHP).
+A aplicação exige HTTPS. Ver §6.6 e o [CHANGELOG](CHANGELOG.md).
+
 Dados reais de infraestrutura (hostname, contas de servidor, caminhos
 internos) de qualquer implantação em produção são deliberadamente mantidos
 fora deste repositório. Veja [DOCUMENTATION.md](DOCUMENTATION.md) para o
