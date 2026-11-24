@@ -463,7 +463,9 @@ morre calado: rodar com `php -d disable_functions= tests/test_sp_viewer.php`.
 - **Não verificado em produção:** página de chamado com imagens, tema e
   autocomplete em navegador autenticado (verificados localmente com o
   mesmo código; em produção dependem de login com a senha de acesso).
-- **Pendente:** usuário do banco segue com `ALL PRIVILEGES` (§9).
+- **Banco:** usuário do visor reduzido de `ALL PRIVILEGES` a `SELECT`.
+  Prova com a credencial do próprio visor: leitura responde e `CREATE TABLE`
+  é negado.
 
 ## 7. Replicando para outro provedor/cliente
 
@@ -513,6 +515,6 @@ replicações futuras. Não é servido/executado localmente.
 
 ## 9. Pendências / possíveis melhorias (não aplicadas, apenas observadas)
 
-- Trocar o usuário MySQL de produção para um `SELECT`-only real, em qualquer instância que ainda não tenha isso (§6). Na instância original, medido em 2026-11-24: ainda `ALL PRIVILEGES`, e o SupportPal antigo (mesmo usuário) não grava no banco desde 2026-07-10.
+- Trocar o usuário MySQL de produção para um `SELECT`-only real, em qualquer instância que ainda não tenha isso (§6). Na instância original isso foi feito em 2026-11-24 (§6.7).
 - Adotar git no diretório de produção do servidor, ou ao menos fazer deploys a partir deste repositório local versionado.
 - Remover páginas padrão do painel de hosting (`index.html` etc.) que não são usadas pelo app e podem confundir quem administra o hosting.
